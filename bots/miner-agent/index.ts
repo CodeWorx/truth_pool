@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import IDL from "../../target/idl/truth_pool.json";
 
 const PROGRAM_ID = new PublicKey("TrutHPooL11111111111111111111111111111111");
-const RPC_URL = "https://api.devnet.solana.com";
+const RPC_URL = process.env.RPC_URL || "https://api.devnet.solana.com";
 const WALLET_PATH = process.env.WALLET_PATH || "miner_id.json";
 
 const CONFIG = {
@@ -35,9 +35,10 @@ function normalizeData(rawData: any, format: any): string {
 }
 
 async function main() {
-    const connection = new Connection(RPC_URL);
-    // In prod, create keypair if not exists
+    const connection = new Connection(RPC_URL, 'confirmed');
+    // Ensure wallet exists
     if (!fs.existsSync(WALLET_PATH)) {
+        console.log("Creating new miner wallet...");
         fs.writeFileSync(WALLET_PATH, JSON.stringify(Array.from(Keypair.generate().secretKey)));
     }
     const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(WALLET_PATH, 'utf-8'))));
@@ -79,8 +80,7 @@ async function runCycle(program: Program, lit: any, keypair: Keypair) {
 
         if (JSON.stringify(data.status) === JSON.stringify({ commitPhase: {} })) {
             console.log(`Processing Commit: ${data.uniqueEventId}`);
-            // Mock Fetch
-            const rawAnswer = "Lakers 110-105"; 
+            const rawAnswer = "YES"; // Placeholder: In prod call API here
             
             let finalAnswer;
             try {
@@ -93,7 +93,7 @@ async function runCycle(program: Program, lit: any, keypair: Keypair) {
             const salt = uuidv4();
             const voteHash = sha256.digest(finalAnswer + salt);
 
-            // Lit Encryption
+            // Encryption
             const authSig = await LitJsSdk.checkAndSignAuthSig({ chain: "solana", nonce: await lit.getLatestBlockhash() });
             const { ciphertext } = await LitJsSdk.encryptString({
                 accessControlConditions: [{
@@ -102,16 +102,24 @@ async function runCycle(program: Program, lit: any, keypair: Keypair) {
                 authSig, chain: 'solana', dataToEncrypt: salt,
             }, lit);
 
+            const [minerProfile] = await PublicKey.findProgramAddress(
+                [Buffer.from("miner"), keypair.publicKey.toBuffer()],
+                program.programId
+            );
+
+            // Execute Commit
             await program.methods.commitVote(Array.from(voteHash), Buffer.from(ciphertext))
                 .accounts({
                     voter: keypair.publicKey,
                     queryAccount: job.publicKey,
-                    minerProfile: (await PublicKey.findProgramAddress([Buffer.from("miner"), keypair.publicKey.toBuffer()], PROGRAM_ID))[0]
+                    minerProfile: minerProfile,
+                    categoryStats: (await PublicKey.findProgramAddress([Buffer.from("category"), Buffer.from(data.categoryId)], program.programId))[0]
                 })
                 .rpc();
             
             console.log("Vote Committed.");
         }
+        // Reveal Logic Omitted: In production this would check for RevealPhase, fetch cached salt, and submit.
     }
 }
 

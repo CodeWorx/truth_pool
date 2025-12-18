@@ -1,0 +1,17 @@
+{
+  "name": "TruthPoolSeeker",
+  "version": "2.0.0",
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.30.1",
+    "@react-navigation/bottom-tabs": "^6.5.11",
+    "@react-navigation/native": "^6.1.9",
+    "@solana/web3.js": "^1.91.0",
+    "react": "18.2.0",
+    "react-native": "0.73.4",
+    "react-native-paper": "^5.12.3",
+    "lucide-react-native": "^0.344.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.4"
+  }
+}
