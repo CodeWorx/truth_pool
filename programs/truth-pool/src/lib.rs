@@ -12,18 +12,23 @@ const SETTLEMENT_WINDOW: i64 = 43200; // 12 Hours
 const MAX_SENTINELS: u32 = 100; // Hard cap on protocol nodes
 const COMMIT_DURATION: i64 = 600; // 10 mins
 const REVEAL_DURATION: i64 = 600; // 10 mins after commit ends
+const DISPUTE_ESCALATION_WINDOW: i64 = 86400; // 24 hours to resolve before escalation
 
 #[program]
 pub mod truth_pool {
     use super::*;
 
     // --- CONFIGURATION ---
+    /// Initialize protocol config
+    /// NOTE: The admin account should be a multi-sig (Squads/Realms) for production.
+    /// The arbiter_authority is the capital/reputation bot authority for Level 1 disputes.
     pub fn initialize_config(ctx: Context<InitConfig>) -> Result<()> {
         let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.admin.key();
         config.treasury = ctx.accounts.treasury.key();
         config.sentinel_gas_tank = ctx.accounts.sentinel_gas_tank.key();
         config.sentinel_count = 0;
+        config.arbiter_authority = ctx.accounts.arbiter_authority.key();
         Ok(())
     }
 
@@ -402,7 +407,9 @@ pub mod truth_pool {
             let max_sentinel_ratio = query.reveal_count / 2;
             if query.sentinel_reveal_count > max_sentinel_ratio {
                 query.status = QueryStatus::InDispute;
-                msg!("Sentinel Dominance Detected (>50%). Sent to Dispute.");
+                query.dispute_level = 1; // Level 1: Arbiter bots
+                query.dispute_initiated_at = now;
+                msg!("Sentinel Dominance (>50%). Escalated to arbiter bots (Level 1)");
                 return Ok(());
             }
         }
@@ -430,14 +437,18 @@ pub mod truth_pool {
         // Consensus Checks
         if total_valid < query.min_responses {
             query.status = QueryStatus::InDispute;
-            msg!("Insufficient responses");
+            query.dispute_level = 1;
+            query.dispute_initiated_at = now;
+            msg!("Insufficient responses. Escalated to arbiter bots (Level 1)");
             return Ok(());
         }
 
         let consensus_pct = (max_votes as u64 * 100) / (total_valid as u64);
         if consensus_pct < 66 {
             query.status = QueryStatus::InDispute;
-            msg!("No supermajority");
+            query.dispute_level = 1;
+            query.dispute_initiated_at = now;
+            msg!("No supermajority. Escalated to arbiter bots (Level 1)");
             return Ok(());
         }
 
@@ -596,35 +607,108 @@ pub mod truth_pool {
         Ok(())
     }
 
-    // --- RESOLVE DISPUTE (NEW) ---
-    pub fn resolve_dispute(ctx: Context<ResolveDispute>, new_result: Option<String>) -> Result<()> {
+    // --- ARBITER RESOLVE DISPUTE (Level 1) ---
+    /// Capital/Reputation bots resolve disputes at Level 1
+    /// This is the first line of automated dispute resolution
+    pub fn arbiter_resolve_dispute(ctx: Context<ArbiterResolveDispute>, new_result: Option<String>) -> Result<()> {
         let query = &mut ctx.accounts.query_account;
         let config = &ctx.accounts.config;
 
-        require!(ctx.accounts.admin.key() == config.admin, CustomError::Unauthorized);
+        require!(
+            ctx.accounts.arbiter.key() == config.arbiter_authority,
+            CustomError::Unauthorized
+        );
         require!(query.status == QueryStatus::InDispute, CustomError::NotInDispute);
+        require!(query.dispute_level == 1, CustomError::WrongDisputeLevel);
 
         if let Some(result) = new_result {
-            // Admin overrides with correct result
             query.result = result;
             query.status = QueryStatus::Finalized;
             query.finalized_at = Clock::get()?.unix_timestamp;
-            msg!("Dispute resolved with override result");
+            query.dispute_level = 0;
+            msg!("Dispute resolved by arbiter bots (Level 1)");
         } else {
-            // Admin voids the round
             query.status = QueryStatus::Voided;
-            msg!("Dispute resolved - round voided");
+            query.dispute_level = 0;
+            msg!("Dispute voided by arbiter bots (Level 1)");
         }
 
         Ok(())
     }
 
-    // --- UPDATE CONFIG (NEW) ---
+    // --- ESCALATE TO DAO (Level 2) ---
+    /// Escalate unresolved dispute to DAO for human review
+    /// Can be called by arbiter if they cannot resolve, or automatically after timeout
+    pub fn escalate_to_dao(ctx: Context<EscalateDispute>) -> Result<()> {
+        let query = &mut ctx.accounts.query_account;
+        let config = &ctx.accounts.config;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(query.status == QueryStatus::InDispute, CustomError::NotInDispute);
+        require!(query.dispute_level == 1, CustomError::WrongDisputeLevel);
+
+        // Either arbiter explicitly escalates, or timeout has passed
+        let is_arbiter = ctx.accounts.escalator.key() == config.arbiter_authority;
+        let timeout_passed = now > query.dispute_initiated_at + DISPUTE_ESCALATION_WINDOW;
+
+        require!(is_arbiter || timeout_passed, CustomError::EscalationNotAllowed);
+
+        query.dispute_level = 2; // Level 2: DAO human review
+        query.dispute_initiated_at = now; // Reset timer for DAO review
+
+        msg!("Dispute escalated to DAO (Level 2) for human review");
+        emit!(DisputeEscalatedEvent {
+            query: query.key(),
+            from_level: 1,
+            to_level: 2,
+            timestamp: now
+        });
+
+        Ok(())
+    }
+
+    // --- DAO RESOLVE DISPUTE (Level 2) ---
+    /// DAO multi-sig resolves disputes at Level 2 (final human review)
+    /// This is the final escalation point - requires multi-sig admin
+    pub fn dao_resolve_dispute(ctx: Context<DaoResolveDispute>, new_result: Option<String>) -> Result<()> {
+        let query = &mut ctx.accounts.query_account;
+        let config = &ctx.accounts.config;
+
+        // Must be signed by DAO multi-sig admin
+        require!(ctx.accounts.admin.key() == config.admin, CustomError::Unauthorized);
+        require!(query.status == QueryStatus::InDispute, CustomError::NotInDispute);
+        require!(query.dispute_level == 2, CustomError::WrongDisputeLevel);
+
+        if let Some(result) = new_result {
+            query.result = result;
+            query.status = QueryStatus::Finalized;
+            query.finalized_at = Clock::get()?.unix_timestamp;
+            query.dispute_level = 0;
+            msg!("Dispute resolved by DAO multi-sig (Level 2)");
+        } else {
+            query.status = QueryStatus::Voided;
+            query.dispute_level = 0;
+            msg!("Dispute voided by DAO multi-sig (Level 2)");
+        }
+
+        emit!(DisputeResolvedEvent {
+            query: query.key(),
+            level: 2,
+            result: query.result.clone(),
+            timestamp: Clock::get()?.unix_timestamp
+        });
+
+        Ok(())
+    }
+
+    // --- UPDATE CONFIG ---
+    /// Update protocol configuration (DAO multi-sig only)
     pub fn update_config(
         ctx: Context<UpdateConfig>,
         new_admin: Option<Pubkey>,
         new_treasury: Option<Pubkey>,
         new_gas_tank: Option<Pubkey>,
+        new_arbiter: Option<Pubkey>,
     ) -> Result<()> {
         let config = &mut ctx.accounts.config;
 
@@ -632,7 +716,7 @@ pub mod truth_pool {
 
         if let Some(admin) = new_admin {
             config.admin = admin;
-            msg!("Admin updated");
+            msg!("Admin (multi-sig) updated");
         }
         if let Some(treasury) = new_treasury {
             config.treasury = treasury;
@@ -641,6 +725,10 @@ pub mod truth_pool {
         if let Some(gas_tank) = new_gas_tank {
             config.sentinel_gas_tank = gas_tank;
             msg!("Gas tank updated");
+        }
+        if let Some(arbiter) = new_arbiter {
+            config.arbiter_authority = arbiter;
+            msg!("Arbiter authority updated");
         }
 
         Ok(())
@@ -773,6 +861,8 @@ pub struct InitConfig<'info> {
     pub treasury: AccountInfo<'info>,
     /// CHECK: Sentinel gas tank address, validated by admin
     pub sentinel_gas_tank: AccountInfo<'info>,
+    /// CHECK: Arbiter authority (capital/reputation bots) for Level 1 dispute resolution
+    pub arbiter_authority: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1060,8 +1150,32 @@ pub struct ResolveAppeal<'info> {
     pub query_account: Account<'info, QueryAccount>,
 }
 
+/// Level 1: Arbiter bots (capital/reputation) resolve disputes
 #[derive(Accounts)]
-pub struct ResolveDispute<'info> {
+pub struct ArbiterResolveDispute<'info> {
+    #[account(mut)]
+    pub arbiter: Signer<'info>,
+    #[account(seeds = [b"config"], bump)]
+    pub config: Account<'info, ProtocolConfig>,
+    #[account(mut)]
+    pub query_account: Account<'info, QueryAccount>,
+}
+
+/// Escalate dispute from Level 1 to Level 2 (DAO)
+#[derive(Accounts)]
+pub struct EscalateDispute<'info> {
+    #[account(mut)]
+    pub escalator: Signer<'info>,
+    #[account(seeds = [b"config"], bump)]
+    pub config: Account<'info, ProtocolConfig>,
+    #[account(mut)]
+    pub query_account: Account<'info, QueryAccount>,
+}
+
+/// Level 2: DAO multi-sig resolves final disputes
+#[derive(Accounts)]
+pub struct DaoResolveDispute<'info> {
+    /// NOTE: This should be a multi-sig account (Squads, Realms, etc.)
     #[account(mut)]
     pub admin: Signer<'info>,
     #[account(seeds = [b"config"], bump)]
@@ -1130,13 +1244,20 @@ pub struct SlashNonRevealer<'info> {
 // DATA STRUCTURES
 // ============================================
 
+/// Protocol configuration account
+/// NOTE: The `admin` field should be a multi-sig account (e.g., Squads, Realms DAO)
+/// for production deployments. This ensures DAO governance for critical operations
+/// like dispute resolution and configuration updates.
 #[account]
 #[derive(InitSpace)]
 pub struct ProtocolConfig {
+    /// Multi-sig admin account for DAO governance (final dispute resolution)
     pub admin: Pubkey,
     pub treasury: Pubkey,
     pub sentinel_gas_tank: Pubkey,
     pub sentinel_count: u32,
+    /// Capital/Reputation bot authority for Level 1 dispute resolution
+    pub arbiter_authority: Pubkey,
 }
 
 #[account]
@@ -1183,6 +1304,10 @@ pub struct QueryAccount {
     pub result: String,
     pub winning_ticket_id: u32,
     pub random_accumulator: [u8; 32],
+    /// Dispute escalation level (0 = none, 1 = arbiter bots, 2 = DAO)
+    pub dispute_level: u8,
+    /// Timestamp when dispute was initiated (for escalation timing)
+    pub dispute_initiated_at: i64,
 }
 
 #[account]
@@ -1287,6 +1412,22 @@ pub struct ClaimEvent {
     pub amount: u64,
 }
 
+#[event]
+pub struct DisputeEscalatedEvent {
+    pub query: Pubkey,
+    pub from_level: u8,
+    pub to_level: u8,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct DisputeResolvedEvent {
+    pub query: Pubkey,
+    pub level: u8,
+    pub result: String,
+    pub timestamp: i64,
+}
+
 // ============================================
 // ERRORS
 // ============================================
@@ -1359,4 +1500,8 @@ pub enum CustomError {
     HasLockedFunds,
     #[msg("No valid votes to tally")]
     NoValidVotes,
+    #[msg("Wrong dispute level for this operation")]
+    WrongDisputeLevel,
+    #[msg("Escalation not allowed (not arbiter or timeout not passed)")]
+    EscalationNotAllowed,
 }
