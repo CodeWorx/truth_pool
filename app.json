@@ -1,0 +1,33 @@
+{
+  "name": "TruthPool",
+  "displayName": "TruthPool",
+  "expo": {
+    "name": "TruthPool",
+    "slug": "truthpool",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#14F195"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.truthpool.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#14F195"
+      },
+      "package": "com.truthpool.app",
+      "versionCode": 1
+    },
+    "scheme": "truthpool"
+  }
+}

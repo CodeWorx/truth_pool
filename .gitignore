@@ -30,8 +30,35 @@ Thumbs.db
 *.key
 *.mobileprovision
 *.orig.*
+*.hprof
+*.keystore
+
+# Android
 android/app/release/
+android/app/build/
+android/app/.cxx/
+android/.gradle/
+android/build/
+android/local.properties
+*.apk
+*.aab
+
+# iOS
+ios/Pods/
+ios/build/
+*.xcworkspace
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserstate
+project.xcworkspace/
+xcuserdata/
 
 # Solana/Anchor
 .anchor/
 test-ledger/
+
+# Wallet files (never commit!)
+*_id.json
+salt_cache.json
