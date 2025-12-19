@@ -1,4 +1,4 @@
-import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { Program, AnchorProvider, Wallet, BN } from "@coral-xyz/anchor";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { v4 as uuidv4 } from "uuid";
@@ -9,7 +9,6 @@ import IDL from "../../target/idl/truth_pool.json";
 // CONFIGURATION
 // ============================================
 
-const PROGRAM_ID = new PublicKey("TrutHPooL11111111111111111111111111111111");
 const RPC_URL = process.env.RPC_URL || "https://api.devnet.solana.com";
 const WALLET_PATH = process.env.WALLET_PATH || "miner_id.json";
 const SALT_CACHE_PATH = process.env.SALT_CACHE_PATH || "salt_cache.json";
@@ -54,8 +53,8 @@ interface SaltCache {
 interface QueryData {
   uniqueEventId: string;
   categoryId: string;
-  status: { commitPhase?: {}; revealPhase?: {} };
-  format: { binary?: {}; score?: {}; decimal?: {}; string?: {}; optionIndex?: {} };
+  status: { commitPhase?: Record<string, never>; revealPhase?: Record<string, never> };
+  format: { binary?: Record<string, never>; score?: Record<string, never>; decimal?: Record<string, never>; string?: Record<string, never>; optionIndex?: Record<string, never> };
   commitDeadline: BN;
   revealDeadline: BN;
 }
@@ -206,7 +205,7 @@ async function main() {
   const provider = new AnchorProvider(connection, new Wallet(keypair), {
     commitment: "confirmed",
   });
-  const program = new Program(IDL as any, PROGRAM_ID, provider);
+  const program = new Program(IDL as any, provider);
 
   let saltCache = loadSaltCache();
 
@@ -215,7 +214,8 @@ async function main() {
   console.log(`   Categories: ${CONFIG.categories.join(", ")}`);
   console.log("");
 
-  // Main loop
+  // Main loop - intentional infinite loop for daemon process
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       // Check gas prices
@@ -253,7 +253,7 @@ async function runCommitCycle(
 ) {
   console.log("Scanning for commit opportunities...");
 
-  const queries = await program.account.queryAccount.all();
+  const queries = await (program.account as any).queryAccount.all();
   const now = Math.floor(Date.now() / 1000);
 
   for (const query of queries) {
@@ -354,7 +354,7 @@ async function runRevealCycle(
 ) {
   console.log("Scanning for reveal opportunities...");
 
-  const queries = await program.account.queryAccount.all();
+  const queries = await (program.account as any).queryAccount.all();
   const now = Math.floor(Date.now() / 1000);
 
   for (const query of queries) {

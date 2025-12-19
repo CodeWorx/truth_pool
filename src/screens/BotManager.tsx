@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { View, FlatList } from 'react-native';
 import { Text, Card, Button, FAB, Dialog, Portal, TextInput, useTheme, Chip, SegmentedButtons } from 'react-native-paper';
-import { Shield, Fuel } from 'lucide-react-native';
+// Icons available for future use
 
 const INITIAL_BOTS = [
   { id: '1', name: 'NBA Sniper', type: 'Miner', stake: 1.0, activeVotes: 0, maxVotes: 2, status: 'Running' },

@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { View, FlatList, Alert } from 'react-native';
-import { Text, Card, Button, FAB, Dialog, Portal, TextInput, useTheme, Chip, ProgressBar } from 'react-native-paper';
-import { TrendingUp, Clock, AlertTriangle } from 'lucide-react-native';
+import { Text, Card, Button, Dialog, Portal, TextInput, useTheme, Chip, ProgressBar } from 'react-native-paper';
+import { Clock, AlertTriangle } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useSolana } from '../context/SolanaContext';
 
 const MARKETS_CACHE_KEY = 'truthpool_markets_cache';
 const NOW = Math.floor(Date.now() / 1000);

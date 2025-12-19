@@ -8,7 +8,6 @@ import IDL from "../../target/idl/truth_pool.json";
 // ============================================
 
 const WALLET_PATH = process.env.WALLET_PATH || "pulse_admin.json";
-const PROGRAM_ID = new PublicKey("TrutHPooL11111111111111111111111111111111");
 const RPC_URL = process.env.RPC_URL || "https://api.devnet.solana.com";
 
 const DEFAULT_BOUNTY = 50_000_000; // 0.05 SOL
@@ -85,7 +84,7 @@ async function marketExists(
 ): Promise<boolean> {
   try {
     const [queryPDA] = await getQueryPDA(program.programId, categoryId, eventId);
-    const account = await program.account.queryAccount.fetchNullable(queryPDA);
+    const account = await (program.account as any).queryAccount.fetchNullable(queryPDA);
     return account !== null;
   } catch {
     return false;
@@ -186,7 +185,7 @@ async function main() {
   const provider = new AnchorProvider(connection, new Wallet(keypair), {
     commitment: "confirmed",
   });
-  const program = new Program(IDL as any, PROGRAM_ID, provider);
+  const program = new Program(IDL as any, provider);
 
   console.log("Pulse AMM Starting...");
   console.log(`   Wallet: ${keypair.publicKey.toBase58()}`);
@@ -223,7 +222,7 @@ async function main() {
       const [voteStats] = await getVoteStatsPDA(program.programId, queryAccount);
 
       // Check if category exists
-      const categoryAccount = await program.account.categoryStats.fetchNullable(categoryStats);
+      const categoryAccount = await (program.account as any).categoryStats.fetchNullable(categoryStats);
       if (!categoryAccount) {
         console.log(`  Category "${event.category}" not initialized. Skipping.`);
         console.log(`     Admin must run: initialize_category("${event.category}")`);
@@ -236,7 +235,7 @@ async function main() {
 
       await withRetry(
         () =>
-          program.methods
+          (program.methods as any)
             .requestData(event.id, event.category, new BN(bounty), format)
             .accounts({
               requester: keypair.publicKey,

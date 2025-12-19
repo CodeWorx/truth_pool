@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
-import { Text, Card, Button, Avatar, useTheme, Surface } from 'react-native-paper';
+import { Text, Card, Button, useTheme, Surface } from 'react-native-paper';
 import { useSolana } from '../context/SolanaContext';
 import { Bot, Trophy, Wallet, Activity } from 'lucide-react-native';
 

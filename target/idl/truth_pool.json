@@ -1,0 +1,193 @@
+{
+  "address": "TrutHPooL11111111111111111111111111111111",
+  "version": "0.1.0",
+  "name": "truth_pool",
+  "instructions": [
+    {
+      "name": "initializeConfig",
+      "accounts": [
+        { "name": "config", "isMut": true, "isSigner": false },
+        { "name": "admin", "isMut": true, "isSigner": true },
+        { "name": "treasury", "isMut": false, "isSigner": false },
+        { "name": "sentinelGasTank", "isMut": false, "isSigner": false },
+        { "name": "arbiterAuthority", "isMut": false, "isSigner": false },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ],
+      "args": []
+    },
+    {
+      "name": "initializeCategory",
+      "accounts": [
+        { "name": "categoryStats", "isMut": true, "isSigner": false },
+        { "name": "admin", "isMut": true, "isSigner": true },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "categoryId", "type": "string" }
+      ]
+    },
+    {
+      "name": "registerMiner",
+      "accounts": [
+        { "name": "minerProfile", "isMut": true, "isSigner": false },
+        { "name": "categoryStats", "isMut": true, "isSigner": false },
+        { "name": "user", "isMut": true, "isSigner": true },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "categoryId", "type": "string" }
+      ]
+    },
+    {
+      "name": "requestData",
+      "accounts": [
+        { "name": "requester", "isMut": true, "isSigner": true },
+        { "name": "categoryStats", "isMut": true, "isSigner": false },
+        { "name": "queryAccount", "isMut": true, "isSigner": false },
+        { "name": "voteStats", "isMut": true, "isSigner": false },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "eventId", "type": "string" },
+        { "name": "categoryId", "type": "string" },
+        { "name": "bounty", "type": "u64" },
+        { "name": "format", "type": "u8" }
+      ]
+    },
+    {
+      "name": "commitVote",
+      "accounts": [
+        { "name": "voter", "isMut": true, "isSigner": true },
+        { "name": "minerProfile", "isMut": true, "isSigner": false },
+        { "name": "queryAccount", "isMut": true, "isSigner": false },
+        { "name": "categoryStats", "isMut": false, "isSigner": false },
+        { "name": "voterRecord", "isMut": true, "isSigner": false },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "voteHash", "type": { "array": ["u8", 32] } },
+        { "name": "encryptedSalt", "type": "bytes" }
+      ]
+    },
+    {
+      "name": "revealVote",
+      "accounts": [
+        { "name": "voter", "isMut": true, "isSigner": true },
+        { "name": "minerProfile", "isMut": true, "isSigner": false },
+        { "name": "queryAccount", "isMut": true, "isSigner": false },
+        { "name": "voterRecord", "isMut": true, "isSigner": false },
+        { "name": "voteStats", "isMut": true, "isSigner": false }
+      ],
+      "args": [
+        { "name": "answer", "type": "string" },
+        { "name": "salt", "type": "string" }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "admin", "type": "publicKey" },
+          { "name": "treasury", "type": "publicKey" },
+          { "name": "sentinelGasTank", "type": "publicKey" },
+          { "name": "sentinelCount", "type": "u32" },
+          { "name": "arbiterAuthority", "type": "publicKey" }
+        ]
+      }
+    },
+    {
+      "name": "CategoryStats",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "categoryId", "type": "string" },
+          { "name": "activeMiners", "type": "u32" }
+        ]
+      }
+    },
+    {
+      "name": "MinerProfile",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "authority", "type": "publicKey" },
+          { "name": "categoryId", "type": "string" },
+          { "name": "lockedLiquidity", "type": "u64" },
+          { "name": "pendingSettlements", "type": "u64" },
+          { "name": "reputation", "type": "i32" },
+          { "name": "isPartner", "type": "bool" },
+          { "name": "isSentinel", "type": "bool" },
+          { "name": "isActive", "type": "bool" }
+        ]
+      }
+    },
+    {
+      "name": "QueryAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "uniqueEventId", "type": "string" },
+          { "name": "categoryId", "type": "string" },
+          { "name": "requester", "type": "publicKey" },
+          { "name": "bounty", "type": "u64" },
+          { "name": "format", "type": "u8" },
+          { "name": "status", "type": { "defined": "QueryStatus" } },
+          { "name": "commitDeadline", "type": "i64" },
+          { "name": "revealDeadline", "type": "i64" },
+          { "name": "finalAnswer", "type": { "option": "string" } },
+          { "name": "xorAccumulator", "type": { "array": ["u8", 32] } }
+        ]
+      }
+    },
+    {
+      "name": "VoterRecord",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "voter", "type": "publicKey" },
+          { "name": "queryAccount", "type": "publicKey" },
+          { "name": "voteHash", "type": { "array": ["u8", 32] } },
+          { "name": "encryptedSalt", "type": "bytes" },
+          { "name": "revealedAnswer", "type": { "option": "string" } },
+          { "name": "isRevealed", "type": "bool" },
+          { "name": "isClaimed", "type": "bool" }
+        ]
+      }
+    },
+    {
+      "name": "VoteStats",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "queryAccount", "type": "publicKey" },
+          { "name": "totalVotes", "type": "u32" },
+          { "name": "revealedVotes", "type": "u32" }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "QueryStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          { "name": "CommitPhase" },
+          { "name": "RevealPhase" },
+          { "name": "Finalized" },
+          { "name": "Disputed" }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    { "code": 6000, "name": "Unauthorized", "msg": "Unauthorized" },
+    { "code": 6001, "name": "CategoryIdTooLong", "msg": "Category ID too long" },
+    { "code": 6002, "name": "EventIdTooLong", "msg": "Event ID too long" },
+    { "code": 6003, "name": "CategoryMismatch", "msg": "Category mismatch" },
+    { "code": 6004, "name": "MaxSentinelsReached", "msg": "Max sentinels reached" }
+  ]
+}
