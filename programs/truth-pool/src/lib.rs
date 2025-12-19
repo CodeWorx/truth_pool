@@ -442,6 +442,9 @@ pub mod truth_pool {
         }
 
         // FIXED: Trustless Lottery using XOR Accumulator
+        // Guard against division by zero
+        require!(max_votes > 0, CustomError::NoValidVotes);
+
         let final_entropy = query.random_accumulator;
         let random_u64 = u64::from_le_bytes(final_entropy[0..8].try_into().unwrap());
         let winning_ticket = (random_u64 % (max_votes as u64)) + 1;
@@ -590,6 +593,78 @@ pub mod truth_pool {
         } else {
             query.status = QueryStatus::Voided;
         }
+        Ok(())
+    }
+
+    // --- RESOLVE DISPUTE (NEW) ---
+    pub fn resolve_dispute(ctx: Context<ResolveDispute>, new_result: Option<String>) -> Result<()> {
+        let query = &mut ctx.accounts.query_account;
+        let config = &ctx.accounts.config;
+
+        require!(ctx.accounts.admin.key() == config.admin, CustomError::Unauthorized);
+        require!(query.status == QueryStatus::InDispute, CustomError::NotInDispute);
+
+        if let Some(result) = new_result {
+            // Admin overrides with correct result
+            query.result = result;
+            query.status = QueryStatus::Finalized;
+            query.finalized_at = Clock::get()?.unix_timestamp;
+            msg!("Dispute resolved with override result");
+        } else {
+            // Admin voids the round
+            query.status = QueryStatus::Voided;
+            msg!("Dispute resolved - round voided");
+        }
+
+        Ok(())
+    }
+
+    // --- UPDATE CONFIG (NEW) ---
+    pub fn update_config(
+        ctx: Context<UpdateConfig>,
+        new_admin: Option<Pubkey>,
+        new_treasury: Option<Pubkey>,
+        new_gas_tank: Option<Pubkey>,
+    ) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+
+        require!(ctx.accounts.admin.key() == config.admin, CustomError::Unauthorized);
+
+        if let Some(admin) = new_admin {
+            config.admin = admin;
+            msg!("Admin updated");
+        }
+        if let Some(treasury) = new_treasury {
+            config.treasury = treasury;
+            msg!("Treasury updated");
+        }
+        if let Some(gas_tank) = new_gas_tank {
+            config.sentinel_gas_tank = gas_tank;
+            msg!("Gas tank updated");
+        }
+
+        Ok(())
+    }
+
+    // --- DEACTIVATE SENTINEL (NEW) ---
+    pub fn deactivate_sentinel(ctx: Context<DeactivateSentinel>) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        let miner = &mut ctx.accounts.miner_profile;
+
+        require!(ctx.accounts.admin.key() == config.admin, CustomError::Unauthorized);
+        require!(miner.is_sentinel, CustomError::NotASentinel);
+        require!(miner.is_active, CustomError::MinerBanned);
+
+        // Check no locked funds
+        require!(
+            miner.locked_liquidity == 0 && miner.pending_settlements == 0,
+            CustomError::HasLockedFunds
+        );
+
+        miner.is_active = false;
+        config.sentinel_count = config.sentinel_count.saturating_sub(1);
+
+        msg!("Sentinel deactivated");
         Ok(())
     }
 
@@ -986,6 +1061,34 @@ pub struct ResolveAppeal<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ResolveDispute<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(seeds = [b"config"], bump)]
+    pub config: Account<'info, ProtocolConfig>,
+    #[account(mut)]
+    pub query_account: Account<'info, QueryAccount>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateConfig<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(mut, seeds = [b"config"], bump)]
+    pub config: Account<'info, ProtocolConfig>,
+}
+
+#[derive(Accounts)]
+pub struct DeactivateSentinel<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(mut, seeds = [b"config"], bump)]
+    pub config: Account<'info, ProtocolConfig>,
+    #[account(mut)]
+    pub miner_profile: Account<'info, MinerProfile>,
+}
+
+#[derive(Accounts)]
 pub struct SlashLiar<'info> {
     #[account(mut)]
     pub keeper: Signer<'info>,
@@ -1099,13 +1202,16 @@ pub struct VoterRecord {
 }
 
 #[account]
+#[derive(InitSpace)]
 pub struct VoteStatsSafe {
     pub query_key: Pubkey,
+    #[max_len(50)] // 50 options max
     pub options: Vec<VoteOptionSimple>,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct VoteOptionSimple {
+    #[max_len(64)]
     pub value: String,
     pub count: u32,
 }
@@ -1245,4 +1351,12 @@ pub enum CustomError {
     EventIdTooLong,
     #[msg("Category mismatch")]
     CategoryMismatch,
+    #[msg("Query not in dispute")]
+    NotInDispute,
+    #[msg("Account is not a sentinel")]
+    NotASentinel,
+    #[msg("Cannot deactivate: has locked funds")]
+    HasLockedFunds,
+    #[msg("No valid votes to tally")]
+    NoValidVotes,
 }

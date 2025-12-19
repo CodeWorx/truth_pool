@@ -25,6 +25,24 @@ const CONFIG = {
 // TYPES
 // ============================================
 
+/**
+ * SECURITY CONSIDERATIONS for Salt Cache:
+ *
+ * The salt cache is stored in plaintext on disk. This is acceptable for development
+ * but has security implications for production:
+ *
+ * 1. RISK: If an attacker gains read access to the cache file during the commit phase,
+ *    they could see your vote before reveal and potentially front-run or manipulate.
+ *
+ * 2. MITIGATIONS for production:
+ *    - Set restrictive file permissions (chmod 600 salt_cache.json)
+ *    - Use encrypted storage (e.g., Keyring, encrypted filesystem)
+ *    - Store in memory only (lose on crash, but more secure)
+ *    - Use HSM or secure enclave for high-value operations
+ *
+ * 3. The commit-reveal scheme ensures votes cannot be changed after commitment,
+ *    but pre-reveal privacy depends on salt secrecy.
+ */
 interface SaltCache {
   [queryKey: string]: {
     salt: string;
@@ -291,21 +309,25 @@ async function runCommitCycle(
         data.categoryId
       );
 
-      // Execute commit
-      await program.methods
-        .commitVote(
-          Array.from(voteHash) as any, // [u8; 32]
-          Buffer.from([]) // Empty encrypted salt (simplified - no Lit Protocol)
-        )
-        .accounts({
-          voter: keypair.publicKey,
-          minerProfile: minerProfile,
-          queryAccount: query.publicKey,
-          categoryStats: categoryStats,
-          voterRecord: voterRecord,
-          systemProgram: PublicKey.default,
-        })
-        .rpc();
+      // Execute commit with retry
+      await withRetry(
+        () =>
+          program.methods
+            .commitVote(
+              Array.from(voteHash) as any, // [u8; 32]
+              Buffer.from([]) // Empty encrypted salt (simplified - no Lit Protocol)
+            )
+            .accounts({
+              voter: keypair.publicKey,
+              minerProfile: minerProfile,
+              queryAccount: query.publicKey,
+              categoryStats: categoryStats,
+              voterRecord: voterRecord,
+              systemProgram: PublicKey.default,
+            })
+            .rpc(),
+        "Commit"
+      );
 
       // Cache salt for reveal
       saltCache[queryKey] = {
@@ -374,17 +396,21 @@ async function runRevealCycle(
         program.programId
       );
 
-      // Execute reveal
-      await program.methods
-        .revealVote(cached.answer, cached.salt)
-        .accounts({
-          voter: keypair.publicKey,
-          minerProfile: minerProfile,
-          queryAccount: query.publicKey,
-          voterRecord: voterRecord,
-          voteStats: voteStats,
-        })
-        .rpc();
+      // Execute reveal with retry
+      await withRetry(
+        () =>
+          program.methods
+            .revealVote(cached.answer, cached.salt)
+            .accounts({
+              voter: keypair.publicKey,
+              minerProfile: minerProfile,
+              queryAccount: query.publicKey,
+              voterRecord: voterRecord,
+              voteStats: voteStats,
+            })
+            .rpc(),
+        "Reveal"
+      );
 
       console.log(`  Revealed: ${cached.answer}`);
 
@@ -407,6 +433,52 @@ async function runRevealCycle(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Execute a transaction with exponential backoff retry
+ * Retries up to 4 times with delays: 2s, 4s, 8s, 16s
+ */
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  operationName: string
+): Promise<T> {
+  const MAX_RETRIES = 4;
+  const BASE_DELAY_MS = 2000;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await operation();
+    } catch (e: any) {
+      lastError = e;
+
+      // Don't retry on non-recoverable errors
+      const nonRecoverable = [
+        "AlreadyRevealed",
+        "AlreadyClaimed",
+        "HashMismatch",
+        "WrongPhase",
+        "PhaseClosed",
+        "NotCommitted",
+        "Unauthorized",
+        "InsufficientFreeCapital",
+      ];
+
+      if (nonRecoverable.some((code) => e.message?.includes(code))) {
+        throw e;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        console.log(`  ${operationName} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}). Retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 // ============================================

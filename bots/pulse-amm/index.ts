@@ -127,6 +127,56 @@ async function fetchTodaysEvents(): Promise<MarketConfig[]> {
 }
 
 // ============================================
+// HELPERS
+// ============================================
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Execute a transaction with exponential backoff retry
+ * Retries up to 4 times with delays: 2s, 4s, 8s, 16s
+ */
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  operationName: string
+): Promise<T> {
+  const MAX_RETRIES = 4;
+  const BASE_DELAY_MS = 2000;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await operation();
+    } catch (e: any) {
+      lastError = e;
+
+      // Don't retry on non-recoverable errors
+      const nonRecoverable = [
+        "already in use",
+        "Unauthorized",
+        "CategoryIdTooLong",
+        "EventIdTooLong",
+      ];
+
+      if (nonRecoverable.some((code) => e.message?.includes(code))) {
+        throw e;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        console.log(`  ${operationName} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}). Retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// ============================================
 // MAIN
 // ============================================
 
@@ -180,20 +230,24 @@ async function main() {
         continue;
       }
 
-      // Create market
+      // Create market with retry
       const bounty = event.bounty || DEFAULT_BOUNTY;
       const format = event.format ?? 0;
 
-      await program.methods
-        .requestData(event.id, event.category, new BN(bounty), format)
-        .accounts({
-          requester: keypair.publicKey,
-          categoryStats: categoryStats,
-          queryAccount: queryAccount,
-          voteStats: voteStats,
-          systemProgram: PublicKey.default,
-        })
-        .rpc();
+      await withRetry(
+        () =>
+          program.methods
+            .requestData(event.id, event.category, new BN(bounty), format)
+            .accounts({
+              requester: keypair.publicKey,
+              categoryStats: categoryStats,
+              queryAccount: queryAccount,
+              voteStats: voteStats,
+              systemProgram: PublicKey.default,
+            })
+            .rpc(),
+        "CreateMarket"
+      );
 
       console.log(`  Created! Bounty: ${bounty / 1e9} SOL`);
     } catch (e: any) {
