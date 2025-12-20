@@ -1,0 +1,35 @@
+{
+  "schema_version": "v1",
+  "name": "TruthPool",
+  "short_description": "Decentralized Oracle & Prediction Markets",
+  "long_description": "TruthPool is a permissionless, trustless oracle system designed to replace centralized legacy oracles. Participate in prediction markets, stake on outcomes, and earn rewards through our commit-reveal voting mechanism. Features include multi-tier oracle network with regular miners, partners, and sentinels, automated dispute resolution, and transparent on-chain settlements.",
+  "release": {
+    "address": "https://github.com/CodeWorx/truth_pool/releases",
+    "version": "2.0.0",
+    "android": {
+      "min_sdk": 23,
+      "package": "com.truthpool.app"
+    }
+  },
+  "media": {
+    "icon": "assets/icon.png",
+    "banner": "assets/banner.png",
+    "screenshots": [
+      "assets/screenshots/dashboard.png",
+      "assets/screenshots/markets.png",
+      "assets/screenshots/bots.png"
+    ]
+  },
+  "urls": {
+    "website": "https://truthpool.io",
+    "github": "https://github.com/CodeWorx/truth_pool",
+    "support": "https://github.com/CodeWorx/truth_pool/issues",
+    "privacy_policy": "https://truthpool.io/privacy",
+    "terms_of_service": "https://truthpool.io/terms"
+  },
+  "localized_resources": {},
+  "solana_mobile_dapp_publisher_portal": {
+    "google_store_package": "com.truthpool.app",
+    "testing_instructions": "1. Connect a Solana wallet (Phantom, Solflare, etc.)\n2. Navigate to Prediction Markets tab\n3. Browse available markets and place predictions\n4. View your Dashboard for stats and earnings"
+  }
+}

@@ -8,7 +8,7 @@ import { PaperProvider } from 'react-native-paper';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { Activity, LayoutDashboard, Server, TrendingUp } from 'lucide-react-native';
+import { LayoutDashboard, Server, TrendingUp } from 'lucide-react-native';
 
 import { SolanaTheme } from './src/theme/solanaTheme';
 import { SolanaProvider } from './src/context/SolanaContext';
