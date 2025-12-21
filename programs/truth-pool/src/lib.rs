@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 
-declare_id!("TrutHPooL11111111111111111111111111111111");
+declare_id!("TrutH6qfNhnAiVwMz2gxBkqGKxCrHZaQBFSTewxVV1j");
 
 // --- CONSTANTS ---
 const VOTE_BOND: u64 = 500_000_000; // 0.5 SOL
@@ -13,6 +13,10 @@ const MAX_SENTINELS: u32 = 100; // Hard cap on protocol nodes
 const COMMIT_DURATION: i64 = 600; // 10 mins
 const REVEAL_DURATION: i64 = 600; // 10 mins after commit ends
 const DISPUTE_ESCALATION_WINDOW: i64 = 86400; // 24 hours to resolve before escalation
+
+// --- PREDICTION MARKET CONSTANTS ---
+const BET_PRICE_LAMPORTS: u64 = 1_000_000_000; // 1 SOL = $1 equivalent (adjust based on SOL price)
+const CANCELLATION_FEE_BPS: u64 = 1000; // 10% = 1000 basis points
 
 #[program]
 pub mod truth_pool {
@@ -839,6 +843,322 @@ pub mod truth_pool {
         voter_record.bond_released = true;
         Ok(())
     }
+
+    // ============================================
+    // PREDICTION MARKET INSTRUCTIONS
+    // ============================================
+
+    /// Create a new prediction market linked to an oracle query
+    /// Markets use fixed $1 bets with parimutuel payout
+    pub fn create_bet_market(
+        ctx: Context<CreateBetMarket>,
+        market_id: String,
+        lock_timestamp: i64,
+    ) -> Result<()> {
+        require!(market_id.len() <= 64, CustomError::InvalidMarketId);
+
+        let market = &mut ctx.accounts.bet_market;
+        let query = &ctx.accounts.query_account;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(lock_timestamp > now, CustomError::MarketLocked);
+
+        market.market_id = market_id;
+        market.oracle_query = query.key();
+        market.creator = ctx.accounts.creator.key();
+        market.lock_timestamp = lock_timestamp;
+        market.total_yes_bets = 0;
+        market.total_no_bets = 0;
+        market.total_yes_amount = 0;
+        market.total_no_amount = 0;
+        market.status = MarketStatus::Open;
+        market.winning_side = None;
+        market.created_at = now;
+
+        emit!(MarketCreatedEvent {
+            market: market.key(),
+            oracle_query: query.key(),
+            lock_timestamp,
+            creator: ctx.accounts.creator.key(),
+        });
+
+        Ok(())
+    }
+
+    /// Buy a bet on YES or NO outcome
+    /// Each bet costs exactly 1 unit (BET_PRICE_LAMPORTS)
+    /// bet_count: number of $1 bets to place
+    /// side: true = YES, false = NO
+    pub fn buy_bet(
+        ctx: Context<BuyBet>,
+        bet_count: u64,
+        side: bool,
+    ) -> Result<()> {
+        require!(bet_count > 0, CustomError::InsufficientBetAmount);
+
+        let market = &mut ctx.accounts.bet_market;
+        let user_bet = &mut ctx.accounts.user_bet;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(market.status == MarketStatus::Open, CustomError::MarketLocked);
+        require!(now < market.lock_timestamp, CustomError::MarketLocked);
+
+        let total_cost = bet_count.checked_mul(BET_PRICE_LAMPORTS)
+            .ok_or(CustomError::InsufficientBetAmount)?;
+
+        // Transfer SOL from bettor to market
+        let cpi_context = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer {
+                from: ctx.accounts.bettor.to_account_info(),
+                to: market.to_account_info(),
+            },
+        );
+        anchor_lang::system_program::transfer(cpi_context, total_cost)?;
+
+        // Update market totals
+        if side {
+            market.total_yes_bets += bet_count;
+            market.total_yes_amount += total_cost;
+        } else {
+            market.total_no_bets += bet_count;
+            market.total_no_amount += total_cost;
+        }
+
+        // Update user bet record
+        if user_bet.market == Pubkey::default() {
+            // First bet - initialize
+            user_bet.market = market.key();
+            user_bet.bettor = ctx.accounts.bettor.key();
+            user_bet.yes_bets = 0;
+            user_bet.no_bets = 0;
+            user_bet.yes_amount = 0;
+            user_bet.no_amount = 0;
+            user_bet.has_redeemed = false;
+        }
+
+        if side {
+            user_bet.yes_bets += bet_count;
+            user_bet.yes_amount += total_cost;
+        } else {
+            user_bet.no_bets += bet_count;
+            user_bet.no_amount += total_cost;
+        }
+
+        emit!(BetPlacedEvent {
+            market: market.key(),
+            bettor: ctx.accounts.bettor.key(),
+            side,
+            bet_count,
+            amount: total_cost,
+        });
+
+        Ok(())
+    }
+
+    /// Sell back bets before lock with 10% cancellation fee
+    /// sell_count: number of bets to sell back
+    /// side: true = YES, false = NO
+    pub fn sell_bet(
+        ctx: Context<SellBet>,
+        sell_count: u64,
+        side: bool,
+    ) -> Result<()> {
+        require!(sell_count > 0, CustomError::InsufficientBetAmount);
+
+        let market = &mut ctx.accounts.bet_market;
+        let user_bet = &mut ctx.accounts.user_bet;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(market.status == MarketStatus::Open, CustomError::MarketLocked);
+        require!(now < market.lock_timestamp, CustomError::MarketLocked);
+
+        // Check user has enough bets to sell
+        if side {
+            require!(user_bet.yes_bets >= sell_count, CustomError::InsufficientBetAmount);
+        } else {
+            require!(user_bet.no_bets >= sell_count, CustomError::InsufficientBetAmount);
+        }
+
+        let gross_refund = sell_count.checked_mul(BET_PRICE_LAMPORTS)
+            .ok_or(CustomError::InsufficientBetAmount)?;
+
+        // Calculate 10% cancellation fee
+        let fee = gross_refund.checked_mul(CANCELLATION_FEE_BPS)
+            .ok_or(CustomError::InsufficientBetAmount)?
+            .checked_div(10000)
+            .ok_or(CustomError::InsufficientBetAmount)?;
+
+        let net_refund = gross_refund.saturating_sub(fee);
+
+        // Transfer refund from market to bettor
+        **market.to_account_info().try_borrow_mut_lamports()? -= net_refund;
+        **ctx.accounts.bettor.to_account_info().try_borrow_mut_lamports()? += net_refund;
+
+        // Cancellation fee stays in the market pool (redistributed to remaining bettors)
+        // Update market totals
+        if side {
+            market.total_yes_bets -= sell_count;
+            market.total_yes_amount = market.total_yes_amount.saturating_sub(gross_refund);
+            // Fee goes to the pool (stays in market)
+            user_bet.yes_bets -= sell_count;
+            user_bet.yes_amount = user_bet.yes_amount.saturating_sub(gross_refund);
+        } else {
+            market.total_no_bets -= sell_count;
+            market.total_no_amount = market.total_no_amount.saturating_sub(gross_refund);
+            user_bet.no_bets -= sell_count;
+            user_bet.no_amount = user_bet.no_amount.saturating_sub(gross_refund);
+        }
+
+        emit!(BetSoldEvent {
+            market: market.key(),
+            bettor: ctx.accounts.bettor.key(),
+            side,
+            sell_count,
+            net_refund,
+            fee,
+        });
+
+        Ok(())
+    }
+
+    /// Lock the market when lock_timestamp is reached
+    /// If no opposing bets exist, market is cancelled and refunds issued
+    pub fn lock_market(ctx: Context<LockMarket>) -> Result<()> {
+        let market = &mut ctx.accounts.bet_market;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(market.status == MarketStatus::Open, CustomError::MarketAlreadyResolved);
+        require!(now >= market.lock_timestamp, CustomError::MarketNotLocked);
+
+        // Check if opposing bets exist
+        if market.total_yes_bets == 0 || market.total_no_bets == 0 {
+            // No opposing bets - mark for cancellation
+            market.status = MarketStatus::Cancelled;
+            msg!("Market cancelled - no opposing bets");
+        } else {
+            market.status = MarketStatus::Locked;
+            msg!("Market locked for betting");
+        }
+
+        emit!(MarketLockedEvent {
+            market: market.key(),
+            status: market.status.clone(),
+            total_yes_bets: market.total_yes_bets,
+            total_no_bets: market.total_no_bets,
+        });
+
+        Ok(())
+    }
+
+    /// Resolve the market using the oracle result
+    /// Can only be called after oracle query is finalized
+    pub fn resolve_market(ctx: Context<ResolveMarket>) -> Result<()> {
+        let market = &mut ctx.accounts.bet_market;
+        let query = &ctx.accounts.query_account;
+
+        require!(market.status == MarketStatus::Locked, CustomError::MarketNotLocked);
+        require!(query.status == QueryStatus::Finalized, CustomError::OracleNotFinalized);
+
+        // Determine winning side based on oracle result
+        // For binary outcomes: "yes", "true", "1" = YES wins, anything else = NO wins
+        let result_lower = query.result.to_lowercase();
+        let yes_wins = result_lower == "yes" || result_lower == "true" || result_lower == "1";
+
+        market.status = MarketStatus::Resolved;
+        market.winning_side = Some(yes_wins);
+
+        emit!(MarketResolvedEvent {
+            market: market.key(),
+            oracle_query: query.key(),
+            oracle_result: query.result.clone(),
+            winning_side: yes_wins,
+            total_pool: market.total_yes_amount + market.total_no_amount,
+        });
+
+        Ok(())
+    }
+
+    /// Redeem winnings for a resolved market
+    /// Winners split the losers' pool proportionally (parimutuel)
+    pub fn redeem_winnings(ctx: Context<RedeemWinnings>) -> Result<()> {
+        let market = &ctx.accounts.bet_market;
+        let user_bet = &mut ctx.accounts.user_bet;
+
+        require!(market.status == MarketStatus::Resolved, CustomError::MarketNotResolved);
+        require!(!user_bet.has_redeemed, CustomError::AlreadyRedeemed);
+
+        let winning_side = market.winning_side.ok_or(CustomError::MarketNotResolved)?;
+
+        // Get user's winning bet count
+        let user_winning_bets = if winning_side {
+            user_bet.yes_bets
+        } else {
+            user_bet.no_bets
+        };
+
+        require!(user_winning_bets > 0, CustomError::NotAWinner);
+
+        // Calculate payout using parimutuel formula
+        // Payout = (user_winning_bets / total_winning_bets) * total_pool
+        let total_winning_bets = if winning_side {
+            market.total_yes_bets
+        } else {
+            market.total_no_bets
+        };
+
+        let total_pool = market.total_yes_amount + market.total_no_amount;
+
+        // Calculate proportional share: (user_bets * total_pool) / total_winning_bets
+        let payout = (user_winning_bets as u128)
+            .checked_mul(total_pool as u128)
+            .ok_or(CustomError::InsufficientBetAmount)?
+            .checked_div(total_winning_bets as u128)
+            .ok_or(CustomError::InsufficientBetAmount)? as u64;
+
+        // Transfer payout from market to winner
+        **ctx.accounts.bet_market.to_account_info().try_borrow_mut_lamports()? -= payout;
+        **ctx.accounts.bettor.to_account_info().try_borrow_mut_lamports()? += payout;
+
+        user_bet.has_redeemed = true;
+
+        emit!(WinningsRedeemedEvent {
+            market: market.key(),
+            bettor: ctx.accounts.bettor.key(),
+            winning_bets: user_winning_bets,
+            payout,
+        });
+
+        Ok(())
+    }
+
+    /// Claim refund for a cancelled market (no opposing bets)
+    pub fn claim_refund(ctx: Context<ClaimRefund>) -> Result<()> {
+        let market = &ctx.accounts.bet_market;
+        let user_bet = &mut ctx.accounts.user_bet;
+
+        require!(market.status == MarketStatus::Cancelled, CustomError::MarketNotCancelled);
+        require!(!user_bet.has_redeemed, CustomError::AlreadyRedeemed);
+
+        // Refund full amount (no fee for cancellation due to no opposing bets)
+        let total_refund = user_bet.yes_amount + user_bet.no_amount;
+
+        require!(total_refund > 0, CustomError::InsufficientBetAmount);
+
+        // Transfer refund from market to bettor
+        **ctx.accounts.bet_market.to_account_info().try_borrow_mut_lamports()? -= total_refund;
+        **ctx.accounts.bettor.to_account_info().try_borrow_mut_lamports()? += total_refund;
+
+        user_bet.has_redeemed = true;
+
+        emit!(RefundClaimedEvent {
+            market: market.key(),
+            bettor: ctx.accounts.bettor.key(),
+            refund_amount: total_refund,
+        });
+
+        Ok(())
+    }
 }
 
 // ============================================
@@ -964,9 +1284,9 @@ pub struct ManageCapital<'info> {
     pub user: Signer<'info>,
     #[account(
         mut,
-        has_one = authority,
         seeds = [b"miner", user.key().as_ref()],
-        bump
+        bump,
+        constraint = miner_profile.authority == user.key() @ CustomError::Unauthorized
     )]
     pub miner_profile: Account<'info, MinerProfile>,
     pub system_program: Program<'info, System>,
@@ -1013,9 +1333,9 @@ pub struct CommitVote<'info> {
     pub voter: Signer<'info>,
     #[account(
         mut,
-        has_one = authority,  // FIXED: Now requires authority match
         seeds = [b"miner", voter.key().as_ref()],
-        bump
+        bump,
+        constraint = miner_profile.authority == voter.key() @ CustomError::Unauthorized
     )]
     pub miner_profile: Account<'info, MinerProfile>,
     #[account(mut)]
@@ -1042,9 +1362,9 @@ pub struct RevealVote<'info> {
     pub voter: Signer<'info>,
     #[account(
         mut,
-        has_one = authority,  // FIXED: Now requires authority match
         seeds = [b"miner", voter.key().as_ref()],
-        bump
+        bump,
+        constraint = miner_profile.authority == voter.key() @ CustomError::Unauthorized
     )]
     pub miner_profile: Account<'info, MinerProfile>,
     #[account(mut)]
@@ -1084,9 +1404,9 @@ pub struct ClaimStake<'info> {
     pub query_account: Account<'info, QueryAccount>,
     #[account(
         mut,
-        has_one = authority,
         seeds = [b"miner", voter.key().as_ref()],
-        bump
+        bump,
+        constraint = miner_profile.authority == voter.key() @ CustomError::Unauthorized
     )]
     pub miner_profile: Account<'info, MinerProfile>,
     #[account(
@@ -1113,9 +1433,9 @@ pub struct RecoverVoid<'info> {
     pub query_account: Account<'info, QueryAccount>,
     #[account(
         mut,
-        has_one = authority,
         seeds = [b"miner", voter.key().as_ref()],
-        bump
+        bump,
+        constraint = miner_profile.authority == voter.key() @ CustomError::Unauthorized
     )]
     pub miner_profile: Account<'info, MinerProfile>,
     #[account(
@@ -1241,6 +1561,104 @@ pub struct SlashNonRevealer<'info> {
 }
 
 // ============================================
+// PREDICTION MARKET ACCOUNT CONTEXTS
+// ============================================
+
+#[derive(Accounts)]
+#[instruction(market_id: String)]
+pub struct CreateBetMarket<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub query_account: Account<'info, QueryAccount>,
+    #[account(
+        init,
+        payer = creator,
+        space = 8 + BetMarket::INIT_SPACE,
+        seeds = [b"market", query_account.key().as_ref(), market_id.as_bytes()],
+        bump
+    )]
+    pub bet_market: Account<'info, BetMarket>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BuyBet<'info> {
+    #[account(mut)]
+    pub bettor: Signer<'info>,
+    #[account(mut)]
+    pub bet_market: Account<'info, BetMarket>,
+    #[account(
+        init_if_needed,
+        payer = bettor,
+        space = 8 + UserBet::INIT_SPACE,
+        seeds = [b"user_bet", bet_market.key().as_ref(), bettor.key().as_ref()],
+        bump
+    )]
+    pub user_bet: Account<'info, UserBet>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SellBet<'info> {
+    #[account(mut)]
+    pub bettor: Signer<'info>,
+    #[account(mut)]
+    pub bet_market: Account<'info, BetMarket>,
+    #[account(
+        mut,
+        seeds = [b"user_bet", bet_market.key().as_ref(), bettor.key().as_ref()],
+        bump
+    )]
+    pub user_bet: Account<'info, UserBet>,
+}
+
+#[derive(Accounts)]
+pub struct LockMarket<'info> {
+    #[account(mut)]
+    pub bet_market: Account<'info, BetMarket>,
+}
+
+#[derive(Accounts)]
+pub struct ResolveMarket<'info> {
+    #[account(
+        mut,
+        constraint = bet_market.oracle_query == query_account.key()
+    )]
+    pub bet_market: Account<'info, BetMarket>,
+    pub query_account: Account<'info, QueryAccount>,
+}
+
+#[derive(Accounts)]
+pub struct RedeemWinnings<'info> {
+    #[account(mut)]
+    pub bettor: Signer<'info>,
+    #[account(mut)]
+    pub bet_market: Account<'info, BetMarket>,
+    #[account(
+        mut,
+        seeds = [b"user_bet", bet_market.key().as_ref(), bettor.key().as_ref()],
+        bump,
+        constraint = user_bet.bettor == bettor.key()
+    )]
+    pub user_bet: Account<'info, UserBet>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimRefund<'info> {
+    #[account(mut)]
+    pub bettor: Signer<'info>,
+    #[account(mut)]
+    pub bet_market: Account<'info, BetMarket>,
+    #[account(
+        mut,
+        seeds = [b"user_bet", bet_market.key().as_ref(), bettor.key().as_ref()],
+        bump,
+        constraint = user_bet.bettor == bettor.key()
+    )]
+    pub user_bet: Account<'info, UserBet>,
+}
+
+// ============================================
 // DATA STRUCTURES
 // ============================================
 
@@ -1342,6 +1760,60 @@ pub struct VoteOptionSimple {
 }
 
 // ============================================
+// PREDICTION MARKET DATA STRUCTURES
+// ============================================
+
+/// Prediction market linked to an oracle query
+/// Uses fixed $1 bets with parimutuel payout (100% to winners, 0% protocol fee)
+#[account]
+#[derive(InitSpace)]
+pub struct BetMarket {
+    /// Unique market identifier
+    #[max_len(64)]
+    pub market_id: String,
+    /// The oracle query this market is linked to
+    pub oracle_query: Pubkey,
+    /// Creator of the market
+    pub creator: Pubkey,
+    /// Timestamp when betting locks (no more bets after this)
+    pub lock_timestamp: i64,
+    /// Total number of YES bets (each bet = 1 unit)
+    pub total_yes_bets: u64,
+    /// Total number of NO bets (each bet = 1 unit)
+    pub total_no_bets: u64,
+    /// Total SOL wagered on YES
+    pub total_yes_amount: u64,
+    /// Total SOL wagered on NO
+    pub total_no_amount: u64,
+    /// Market status
+    pub status: MarketStatus,
+    /// Winning side (true = YES, false = NO), None if not resolved
+    pub winning_side: Option<bool>,
+    /// When market was created
+    pub created_at: i64,
+}
+
+/// User's bet position in a market
+#[account]
+#[derive(InitSpace)]
+pub struct UserBet {
+    /// Market this bet belongs to
+    pub market: Pubkey,
+    /// User who placed the bet
+    pub bettor: Pubkey,
+    /// Number of YES bets
+    pub yes_bets: u64,
+    /// Number of NO bets
+    pub no_bets: u64,
+    /// Total amount wagered on YES
+    pub yes_amount: u64,
+    /// Total amount wagered on NO
+    pub no_amount: u64,
+    /// Whether winnings/refund has been claimed
+    pub has_redeemed: bool,
+}
+
+// ============================================
 // ENUMS
 // ============================================
 
@@ -1378,6 +1850,20 @@ pub enum CapitalAction {
 pub enum VotePhase {
     Commit,
     Reveal,
+}
+
+/// Prediction market status
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq, InitSpace, Default)]
+pub enum MarketStatus {
+    /// Market is open for betting
+    #[default]
+    Open,
+    /// Betting is locked, awaiting resolution
+    Locked,
+    /// Market resolved, winners can claim
+    Resolved,
+    /// Market cancelled (no opposing bets), refunds available
+    Cancelled,
 }
 
 // ============================================
@@ -1426,6 +1912,69 @@ pub struct DisputeResolvedEvent {
     pub level: u8,
     pub result: String,
     pub timestamp: i64,
+}
+
+// ============================================
+// PREDICTION MARKET EVENTS
+// ============================================
+
+#[event]
+pub struct MarketCreatedEvent {
+    pub market: Pubkey,
+    pub oracle_query: Pubkey,
+    pub lock_timestamp: i64,
+    pub creator: Pubkey,
+}
+
+#[event]
+pub struct BetPlacedEvent {
+    pub market: Pubkey,
+    pub bettor: Pubkey,
+    pub side: bool,
+    pub bet_count: u64,
+    pub amount: u64,
+}
+
+#[event]
+pub struct BetSoldEvent {
+    pub market: Pubkey,
+    pub bettor: Pubkey,
+    pub side: bool,
+    pub sell_count: u64,
+    pub net_refund: u64,
+    pub fee: u64,
+}
+
+#[event]
+pub struct MarketLockedEvent {
+    pub market: Pubkey,
+    pub status: MarketStatus,
+    pub total_yes_bets: u64,
+    pub total_no_bets: u64,
+}
+
+#[event]
+pub struct MarketResolvedEvent {
+    pub market: Pubkey,
+    pub oracle_query: Pubkey,
+    pub oracle_result: String,
+    pub winning_side: bool,
+    pub total_pool: u64,
+}
+
+#[event]
+pub struct WinningsRedeemedEvent {
+    pub market: Pubkey,
+    pub bettor: Pubkey,
+    pub winning_bets: u64,
+    pub payout: u64,
+}
+
+#[event]
+pub struct RefundClaimedEvent {
+    pub market: Pubkey,
+    pub bettor: Pubkey,
+    pub refund_amount: u64,
 }
 
 // ============================================
@@ -1504,4 +2053,29 @@ pub enum CustomError {
     WrongDisputeLevel,
     #[msg("Escalation not allowed (not arbiter or timeout not passed)")]
     EscalationNotAllowed,
+    // Prediction Market Errors
+    #[msg("Market is locked")]
+    MarketLocked,
+    #[msg("Market is not locked")]
+    MarketNotLocked,
+    #[msg("Market already resolved")]
+    MarketAlreadyResolved,
+    #[msg("Market not resolved")]
+    MarketNotResolved,
+    #[msg("Invalid bet side")]
+    InvalidBetSide,
+    #[msg("No opposing bets")]
+    NoOpposingBets,
+    #[msg("Already redeemed")]
+    AlreadyRedeemed,
+    #[msg("Not a winner")]
+    NotAWinner,
+    #[msg("Insufficient bet amount")]
+    InsufficientBetAmount,
+    #[msg("Market not cancelled")]
+    MarketNotCancelled,
+    #[msg("Oracle not finalized")]
+    OracleNotFinalized,
+    #[msg("Invalid market ID")]
+    InvalidMarketId,
 }
