@@ -58,6 +58,7 @@ xcuserdata/
 # Solana/Anchor
 .anchor/
 test-ledger/
+target/
 
 # Wallet files (never commit!)
 *_id.json
